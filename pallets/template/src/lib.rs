@@ -4,8 +4,9 @@
 /// Learn more about FRAME and the core library of Substrate FRAME pallets:
 /// https://substrate.dev/docs/en/knowledgebase/runtime/frame
 
-use frame_support::{decl_module, decl_storage, decl_event, decl_error, dispatch, traits::Get};
+use frame_support::{decl_module, decl_storage, decl_event, decl_error, ensure, StorageMap, dispatch, traits::Get};
 use frame_system::ensure_signed;
+use sp_std::vec::Vec;
 
 #[cfg(test)]
 mod mock;
@@ -29,6 +30,8 @@ decl_storage! {
 		// Learn more about declaring storage items:
 		// https://substrate.dev/docs/en/knowledgebase/runtime/storage#declaring-storage-items
 		Something get(fn something): Option<u32>;
+
+		Proofs: map hasher(blake2_128_concat) Vec<u8> => (T::AccountId, T::BlockNumber);
 	}
 }
 
@@ -39,6 +42,13 @@ decl_event!(
 		/// Event documentation should end with an array that provides descriptive names for event
 		/// parameters. [something, who]
 		SomethingStored(u32, AccountId),
+
+		/// Event emitted when a proof has been claimed. [who, claim]
+        ClaimCreated(AccountId, Vec<u8>),
+        /// Event emitted when a claim is revoked by the owner. [who, claim]
+        ClaimRevoked(AccountId, Vec<u8>),
+        /// Event emitted when a claim is moved to new owner by the owner. [owner, new owner, claim]
+        MoveRevoked(AccountId, AccountId, Vec<u8>),
 	}
 );
 
@@ -49,6 +59,16 @@ decl_error! {
 		NoneValue,
 		/// Errors should have helpful documentation associated with them.
 		StorageOverflow,
+
+		/// The proof has already been claimed.
+        ProofAlreadyClaimed,
+        /// The proof does not exist, so it cannot be revoked.
+        NoSuchProof,
+        /// The proof is claimed by another account, so caller can't revoke it.
+        NotProofOwner,
+
+        /// The proof's len is too long.
+        ProofTooLong,
 	}
 }
 
@@ -99,5 +119,78 @@ decl_module! {
 				},
 			}
 		}
+
+		/// Allow a user to claim ownership of an unclaimed proof.
+        #[weight = 10_000]
+        fn create_claim(origin, proof: Vec<u8>) {
+
+        	let proof_len = proof.len();
+        	ensure!(!(proof_len > 66), Error::<T>::ProofTooLong);
+
+            // Check that the extrinsic was signed and get the signer.
+            // This function will return an error if the extrinsic is not signed.
+            // https://substrate.dev/docs/en/knowledgebase/runtime/origin
+            let sender = ensure_signed(origin)?;
+
+            // Verify that the specified proof has not already been claimed.
+            ensure!(!Proofs::<T>::contains_key(&proof), Error::<T>::ProofAlreadyClaimed);
+
+            // Get the block number from the FRAME System module.
+            let current_block = <frame_system::Module<T>>::block_number();
+
+            // Store the proof with the sender and block number.
+            Proofs::<T>::insert(&proof, (&sender, current_block));
+
+            // Emit an event that the claim was created.
+            Self::deposit_event(RawEvent::ClaimCreated(sender, proof));
+        }
+
+        /// Allow the owner to revoke their claim.
+        #[weight = 10_000]
+        fn revoke_claim(origin, proof: Vec<u8>) {
+            // Check that the extrinsic was signed and get the signer.
+            // This function will return an error if the extrinsic is not signed.
+            // https://substrate.dev/docs/en/knowledgebase/runtime/origin
+            let sender = ensure_signed(origin)?;
+
+            // Verify that the specified proof has been claimed.
+            ensure!(Proofs::<T>::contains_key(&proof), Error::<T>::NoSuchProof);
+
+            // Get owner of the claim.
+            let (owner, _) = Proofs::<T>::get(&proof);
+
+            // Verify that sender of the current call is the claim owner.
+            ensure!(sender == owner, Error::<T>::NotProofOwner);
+
+            // Remove claim from storage.
+            Proofs::<T>::remove(&proof);
+
+            // Emit an event that the claim was erased.
+            Self::deposit_event(RawEvent::ClaimRevoked(sender, proof));
+        }
+
+        #[weight = 10_000]
+        fn move_claim(origin, new_owner: T::AccountId, proof: Vec<u8>){
+        	// Check that the extrinsic was signed and get the signer.
+        	let sender = ensure_signed(origin)?;
+
+        	// Verify that the specified proof has been claimed.
+        	ensure!(Proofs::<T>::contains_key(&proof), Error::<T>::NoSuchProof);
+
+			// Get owner of the claim.
+			let (owner, _) = Proofs::<T>::get(&proof);
+
+			// Verify that sender of the current call is the claim owner.
+			ensure!(sender == owner, Error::<T>::NotProofOwner);
+
+			// Get the block number from the FRAME System module.
+            let current_block = <frame_system::Module<T>>::block_number();
+
+            // Store the proof with the sender and block number.
+            Proofs::<T>::insert(&proof, (&new_owner, current_block));
+
+			// Emit an event that the claim was moved.
+            Self::deposit_event(RawEvent::MoveRevoked(sender, new_owner, proof));
+        }
 	}
 }
